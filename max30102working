@@ -1,0 +1,88 @@
+#include <Wire.h>
+#include "MAX30105.h"        // SparkFun MAX3010x library
+#include "spo2_algorithm.h"  // Included in the same library
+
+MAX30105 particleSensor;
+
+// Buffer size
+#define BUFFER_SIZE 100
+
+// Data buffers
+uint32_t irBuffer[BUFFER_SIZE];
+uint32_t redBuffer[BUFFER_SIZE];
+
+int32_t spo2;          // SPO2 value
+int8_t validSPO2;      // Indicator to show if SPO2 calculation is valid
+int32_t heartRate;     // Heart rate value
+int8_t validHeartRate; // Indicator to show if heart rate calculation is valid
+
+void setup() {
+  Serial.begin(115200);
+  delay(2000);
+  Serial.println("ESP32-C3 SuperMini Boot OK!");
+
+  // Initialize I2C with correct pins (SDA = GPIO6, SCL = GPIO7)
+  Wire.begin(6, 7);
+
+  // Initialize MAX30102
+  if (!particleSensor.begin(Wire, I2C_SPEED_STANDARD)) {
+    Serial.println("MAX30102 not found. Please check wiring!");
+    while (1);
+  }
+
+  // Setup sensor (sampling ~100 Hz)
+  byte ledBrightness = 0x1F; // 0=Off to 255=50mA
+  byte sampleAverage = 4;    // Average samples
+  byte ledMode = 2;          // Red + IR
+  int sampleRate = 100;      // Hz
+  int pulseWidth = 411;      // 69, 118, 215, 411
+  int adcRange = 4096;       // 2048, 4096, 8192, 16384
+  particleSensor.setup(ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange);
+
+  Serial.println("MAX30102 initialization successful!");
+
+  // Collect initial 100 samples
+  Serial.println("Place finger on sensor...");
+  for (int i = 0; i < BUFFER_SIZE; i++) {
+    while (!particleSensor.available()) particleSensor.check();
+    redBuffer[i] = particleSensor.getRed();
+    irBuffer[i] = particleSensor.getIR();
+    particleSensor.nextSample();
+    delay(10);
+  }
+}
+
+void loop() {
+  // Shift buffer left by 25 samples
+  for (int i = 25; i < BUFFER_SIZE; i++) {
+    redBuffer[i - 25] = redBuffer[i];
+    irBuffer[i - 25] = irBuffer[i];
+  }
+
+  // Load 25 new samples
+  for (int i = BUFFER_SIZE - 25; i < BUFFER_SIZE; i++) {
+    while (!particleSensor.available()) particleSensor.check();
+    redBuffer[i] = particleSensor.getRed();
+    irBuffer[i] = particleSensor.getIR();
+    particleSensor.nextSample();
+    delay(10);
+  }
+
+  // Run algorithm
+  maxim_heart_rate_and_oxygen_saturation(
+    irBuffer, BUFFER_SIZE,
+    redBuffer,
+    &spo2, &validSPO2,
+    &heartRate, &validHeartRate);
+
+  // Print results
+  if (validHeartRate && validSPO2) {
+    Serial.print("BPM: ");
+    Serial.print(heartRate);
+    Serial.print("  |  SpO2: ");
+    Serial.print(spo2);
+    Serial.println("%");
+  } else {
+    Serial.println("Reading not valid yet...");
+  }
+}
